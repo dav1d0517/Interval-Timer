@@ -131,7 +131,7 @@ input[type="range"] { accent-color: var(--accent); width: 100%; min-width: 0; }
 <div class="wrap">
   <header>
     <h1>Gong Interval Timer</h1>
-    <p class="sub">Set a total time and your own interval lengths. A gong sounds at the end of each one.</p>
+    <p class="sub">Set a total time and your own interval lengths. A loud horn sounds at the end of each one.</p>
   </header>
 
   <!-- Setup view -->
@@ -167,7 +167,7 @@ input[type="range"] { accent-color: var(--accent); width: 100%; min-width: 0; }
       <div class="row wrap-row">
         <label for="vol" class="meta">Volume</label>
         <input id="vol" type="range" min="0.1" max="1" step="0.05" class="grow">
-        <button id="test" class="btn" type="button">Test gong</button>
+        <button id="test" class="btn" type="button">Test horn</button>
       </div>
     </section>
 
@@ -306,7 +306,7 @@ input[type="range"] { accent-color: var(--accent); width: 100%; min-width: 0; }
     var txt;
     if (!tl.length) txt = "Enter a maximum time and at least one interval longer than 0 seconds.";
     else {
-      txt = tl.length + (tl.length === 1 ? " gong" : " gongs") + " in " + fmt(end) + ". The list adds up to " + fmt(sumOne) + ".";
+      txt = tl.length + (tl.length === 1 ? " horn" : " horns") + " in " + fmt(end) + ". The list adds up to " + fmt(sumOne) + ".";
       if (!state.repeat && sumOne < maxS) txt += " Repeat is off, so the session ends after the last interval.";
       if (sumOne > maxS) txt += " The last interval is cut short at " + fmt(maxS) + ".";
     }
@@ -334,58 +334,60 @@ input[type="range"] { accent-color: var(--accent); width: 100%; min-width: 0; }
   });
 
   /* ---------- audio ---------- */
-  var ctx = null, master = null, noiseBuf = null;
+  var ctx = null, master = null, bus = null;
   function ensureAudio() {
     if (!ctx) {
       var AC = window.AudioContext || window.webkitAudioContext;
       ctx = new AC();
       var comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -10; comp.ratio.value = 6;
       master = ctx.createGain();
       master.gain.value = state.vol;
       master.connect(comp); comp.connect(ctx.destination);
-      var len = ctx.sampleRate * 0.15;
-      noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
-      var d = noiseBuf.getChannelData(0);
-      for (var i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+      // Horn bus: distortion for a harsh, buzzy edge, then a boost around 1.5 kHz
+      // where music has less energy, so the horn stays easy to pick out.
+      var shaper = ctx.createWaveShaper();
+      var curve = new Float32Array(1024);
+      for (var i = 0; i < 1024; i++) { var x = i / 512 - 1; curve[i] = Math.tanh(3.2 * x); }
+      shaper.curve = curve;
+      var boost = ctx.createBiquadFilter();
+      boost.type = "peaking"; boost.frequency.value = 1500; boost.Q.value = 0.8; boost.gain.value = 7;
+      bus = ctx.createGain();
+      bus.gain.value = 0.9;
+      bus.connect(shaper); shaper.connect(boost); boost.connect(master);
     }
     if (ctx.state === "suspended") ctx.resume();
   }
 
-  var RATIOS = [1, 1.19, 1.56, 2.0, 2.52, 2.97, 4.07];
-  var GAINS = [1, 0.6, 0.5, 0.45, 0.3, 0.22, 0.12];
-  var DECAY = [6.5, 5.2, 4.4, 3.6, 2.8, 2.2, 1.6];
-
-  function strike(when, base, nodes) {
-    RATIOS.forEach(function (r, k) {
-      [0, 1.4].forEach(function (detune, di) {
-        if (di === 1 && k > 1) return;
-        var o = ctx.createOscillator(), g = ctx.createGain();
-        var f = base * r + detune;
-        o.type = "sine";
-        o.frequency.setValueAtTime(f * 1.012, when);
-        o.frequency.exponentialRampToValueAtTime(f, when + 0.5);
-        var peak = 0.22 * GAINS[k] * (di ? 0.7 : 1);
-        g.gain.setValueAtTime(0.0001, when);
-        g.gain.linearRampToValueAtTime(peak, when + 0.006);
-        g.gain.exponentialRampToValueAtTime(0.0001, when + DECAY[k]);
-        o.connect(g); g.connect(master);
-        o.start(when); o.stop(when + DECAY[k] + 0.1);
-        nodes.push(o);
-      });
+  // One horn blast: two harsh, slightly clashing sawtooth tones plus a square sub tone,
+  // with a quick upward scoop at the start like an air horn.
+  var VOICES = [
+    { type: "sawtooth", f: 392, g: 0.34 },
+    { type: "sawtooth", f: 466, g: 0.30 },
+    { type: "sawtooth", f: 784, g: 0.14 },
+    { type: "square",   f: 196, g: 0.22 }
+  ];
+  function blast(when, dur, nodes) {
+    VOICES.forEach(function (v) {
+      var o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = v.type;
+      o.frequency.setValueAtTime(v.f * 0.88, when);
+      o.frequency.exponentialRampToValueAtTime(v.f, when + 0.07);
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.linearRampToValueAtTime(v.g, when + 0.015);
+      g.gain.setValueAtTime(v.g, when + dur - 0.05);
+      g.gain.linearRampToValueAtTime(0.0001, when + dur);
+      o.connect(g); g.connect(bus);
+      o.start(when); o.stop(when + dur + 0.05);
+      nodes.push(o);
     });
-    var ns = ctx.createBufferSource(), lp = ctx.createBiquadFilter(), ng = ctx.createGain();
-    ns.buffer = noiseBuf; lp.type = "lowpass"; lp.frequency.value = 900;
-    ng.gain.setValueAtTime(0.25, when);
-    ng.gain.exponentialRampToValueAtTime(0.0001, when + 0.15);
-    ns.connect(lp); lp.connect(ng); ng.connect(master);
-    ns.start(when); ns.stop(when + 0.2);
-    nodes.push(ns);
   }
 
+  // Interval end: two short blasts. Final end of the session: three short, then one long.
   function gong(when, finalStrike) {
-    var nodes = [];
-    strike(when, 98, nodes);
-    if (finalStrike) strike(when + 1.5, 92, nodes);
+    var nodes = [], t = when, n = finalStrike ? 3 : 2, k;
+    for (k = 0; k < n; k++) { blast(t, 0.45, nodes); t += 0.62; }
+    if (finalStrike) blast(t, 1.4, nodes);
     return nodes;
   }
 
@@ -466,7 +468,7 @@ input[type="range"] { accent-color: var(--accent); width: 100%; min-width: 0; }
     run.finished = true; run.running = false;
     clearInterval(timer); unlockScreen();
     $("done-text").textContent = fmt(run.T);
-    $("done-sub").textContent = run.tl.length + (run.tl.length === 1 ? " gong played." : " gongs played.");
+    $("done-sub").textContent = run.tl.length + (run.tl.length === 1 ? " horn played." : " horns played.");
     show("done");
   }
 

@@ -1,5 +1,5 @@
 // Caches the app so it works offline. Bump VERSION when you change any file.
-const VERSION = "gong-timer-v1";
+const VERSION = "gong-timer-v2";
 const CORE = [
   "./",
   "./index.html",
